@@ -11,11 +11,11 @@ Tool performs following sequence of actions:
 - call pg_stop_backup on the master
 - stop XLOG streaming and move streamed XLOGs to pg_xlog folder
 
- ## How
- Sample execution in "--dry-run" mode
+## How
+Sample execution in "--dry-run" mode
 
- ```
-    ./walbouncer_companion.py -c wbtest.yaml -r replica1 -D replica1 -u postgres -n
- ```
+```
+./walbouncer_companion.py -c wbtest.yaml -r replica1 -D replica1 -u postgres -n
+```
 
- See "--help" for more
+See "--help" for more
