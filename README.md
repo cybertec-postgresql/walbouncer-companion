@@ -15,6 +15,8 @@ Tool performs following sequence of actions:
 After that the "cloned" Postgres can be started in replication mode, following Walbouncer or actually also as a normal master
  (with errors being thrown if one accesses dabatases/tablespaces that were not copied over)
 
+NB! If tablespaces are used, one needs to create the exact path structure as on master, manually on the replica.
+
 ## How
 Sample execution in "--dry-run" mode
 

@@ -140,7 +140,7 @@ def get_master_data_diretory():
     return data[0]['data_directory']
 
 
-def do_basebackup(host, user, master_pgdata, slave_pgdata, ts_excl_oids=None, db_excl_oids=None, tablespace_paths_to_copy=None):   # TODO check for tblspace symlinks
+def do_basebackup(host, user, master_pgdata, slave_pgdata, ts_excl_oids=None, db_excl_oids=None, tablespace_paths_to_copy=None):
     excludes = ''
 
     for oid in db_excl_oids:
@@ -159,7 +159,7 @@ def do_basebackup(host, user, master_pgdata, slave_pgdata, ts_excl_oids=None, db
     if not args.dry_run:
         run_shell(cmd_as_args)
 
-    for tblspc in tablespace_paths_to_copy:  # TODO in parallel
+    for tblspc in tablespace_paths_to_copy:
         cmd_t = "rsync {dry_run} -a {user}@{host}:{tblspc}/ {tblspc}"
         cmd = cmd_t.format(host=host, user=user, tblspc=tblspc, dry_run=('-n' if args.dry_run else ''))
         cmd_as_args = shlex.split(cmd)
@@ -184,7 +184,7 @@ def rename_temp_to_xlog(datadir, temp_xlog_dir):    # relative paths
         run_shell(['mv', temp_xlog_dir, os.path.join(datadir, 'pg_xlog')])
 
 
-def start_xlog_streaming(connect_params):     # TODO slots
+def start_xlog_streaming(connect_params):
     connect_params['datadir'] = TEMP_XLOGS_DIR
 
     cmd_t = "pg_receivexlog -h {host} -p {port} -U {user} -D {datadir}"
@@ -205,7 +205,7 @@ def stop_xlog_streaming(process):
         return
 
     # just "hoping" this time is enough to fetch last xlog needed by the backup
-    time.sleep(10)  # TODO check with archive if archiving enabled
+    time.sleep(10)
 
     if process:
         process.terminate()

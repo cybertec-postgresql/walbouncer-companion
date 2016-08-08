@@ -1,0 +1,4 @@
+- host/port + list of includes/excludes to enable replica building w/o WB config
+- check for non-existing tblspace symlinks, currently you'll get an error
+- copy tablespaces in parallel?
+- instead of waiting 10 or x seconds after stop pg_stop_backup, store the lsn and check with the archive folder
