@@ -20,6 +20,7 @@ args = None
 
 def pg_init_connection(**args):
     global pg_connection
+    logging.info('connecting to master Postgres DB...')
     pg_connection = psycopg2.connect(**args)
     pg_connection.autocommit = True
 
@@ -38,23 +39,31 @@ def load_config_file(config_file_path):
 
 
 def get_included_and_excluded_tablespaces_from_config(application_name):
-    logging.info('getting tablespace info for %s', application_name)
+    logging.info('getting include/exclude tablespace info for %s', application_name)
     for c in config.get('configurations', []):
         for config_name, config_dict in c.items():
             if config_name == application_name:
-                logging.info('application_name matched with config %s', c[application_name])
                 return config_dict.get('filter', {}).get('include_tablespaces', []), config_dict.get('filter', {}).get('exclude_tablespaces', [])
     return [], []
 
 
 def get_included_and_excluded_databases_from_config(application_name):
-    logging.info('getting tablespace info for %s', application_name)
+    logging.info('getting include/exclude database info for %s', application_name)
     for c in config.get('configurations', []):
         for config_name, config_dict in c.items():
             if config_name == application_name:
-                logging.info('application_name matched with config %s', c[application_name])
                 return config_dict.get('filter', {}).get('include_databases', []), config_dict.get('filter', {}).get('exclude_databases', [])
     return [], []
+
+
+def get_tablespace_paths_by_oids(oids):
+    if not oids:
+        return []
+    sql = """
+        SELECT pg_catalog.pg_tablespace_location(u) from unnest(%s) u
+    """
+    d = pg_exec(sql, (oids,))
+    return [x['pg_tablespace_location'] for x in d if x['pg_tablespace_location']]
 
 
 def get_oids_for_tablespaces(tablespaces):
@@ -67,13 +76,27 @@ def get_oids_for_tablespaces(tablespaces):
     return [x['oid'] for x in d]
 
 
+def get_oids_for_all_tablespaces():
+    sql = """
+        SELECT oid FROM pg_tablespace
+    """
+    d = pg_exec(sql)
+    return [x['oid'] for x in d]
+
+
 def get_oids_and_tablespaces_for_databases(database_names):
     if not database_names:
         return []
     sql = """
-        SELECT DISTINCT oid, dattablespace FROM pg_database WHERE datname = ANY(%s)
+        SELECT DISTINCT oid, dattablespace, datname FROM pg_database WHERE datname = ANY(%s)
     """
     return pg_exec(sql, (database_names,))
+
+
+def get_all_db_oids():
+    sql = """SELECT oid FROM pg_database"""
+    d = pg_exec(sql)
+    return [x['oid'] for x in d]
 
 
 def run_shell(cmd_line_params):
@@ -122,25 +145,33 @@ def get_master_data_diretory():
     return data[0]['data_directory']
 
 
-def do_basebackup(host, user, master_pgdata, slave_pgdata, ts_inc_oids=None, ts_excl_oids=None,
-                  db_inc_oids=None, db_excl_oids=None):   # TODO -a implies --links, test with tablespaces
+def do_basebackup(host, user, master_pgdata, slave_pgdata, ts_excl_oids=None, db_excl_oids=None, tablespace_paths_to_copy=None):   # TODO check for tblspace symlinks
     excludes = ''
-    for oid in max(db_excl_oids, []):
-        excludes += " --exclude base/{}".format(oid)
-        excludes += " --exclude pg_tblspc/*/*/{}".format(oid)
-        # TODO  Or glob.glob('master/pg_tblspc/*/*/12413/*') ?
+
+    for oid in db_excl_oids:
+            excludes += " --exclude base/{}".format(oid)
+            excludes += " --exclude pg_tblspc/*/*/{}".format(oid)
 
     for oid in max(ts_excl_oids, []):
         excludes += " --exclude pg_tblspc/{}".format(oid)
 
-    cmd_t = "rsync {dry_run} -avz --exclude pg_xlog --exclude postmaster.pid {excludes} {user}@{host}:{master_pgdata}/ {slave_pgdata}"
+    cmd_t = "rsync {dry_run} -a --keep-dirlinks --exclude pg_xlog --exclude postmaster.pid {excludes} {user}@{host}:{master_pgdata}/ {slave_pgdata}"
     cmd = cmd_t.format(host=host, user=user, master_pgdata=master_pgdata, slave_pgdata=slave_pgdata, excludes=excludes,
                        dry_run=('-n' if args.dry_run else ''))
     cmd_as_args = shlex.split(cmd)
-    logging.info("starting file copy with: %s", cmd_as_args)
-    if args.dry_run:
-        return
-    run_shell(cmd_as_args)
+    logging.info("starting main file copy with: %s", cmd)
+
+    if not args.dry_run:
+        run_shell(cmd_as_args)
+
+    for tblspc in tablespace_paths_to_copy:  # TODO in parallel
+        cmd_t = "rsync {dry_run} -a {user}@{host}:{tblspc}/ {tblspc}"
+        cmd = cmd_t.format(host=host, user=user, tblspc=tblspc, dry_run=('-n' if args.dry_run else ''))
+        cmd_as_args = shlex.split(cmd)
+        logging.info("starting tablespace path copy with: %s", cmd)
+
+        if not args.dry_run:
+            run_shell(cmd_as_args)
 
 
 def ensure_dir(dir):    # relative path
@@ -165,7 +196,7 @@ def start_xlog_streaming(connect_params):     # TODO slots
     cmd = cmd_t.format(**connect_params)
     cmd_as_args = shlex.split(cmd)
 
-    logging.info('executing pg_receivexlog: %s', cmd_as_args)
+    logging.info('executing pg_receivexlog: %s', cmd)
 
     if args.dry_run:
         return
@@ -173,7 +204,7 @@ def start_xlog_streaming(connect_params):     # TODO slots
 
 
 def stop_xlog_streaming(process):
-    logging.info('stopping pg_receivexlog process after 10s')
+    logging.info('stopping pg_receivexlog process after 10s [in hope all XLOGS have been transferred. might need adjustment for very busy instances] ')
 
     if args.dry_run:
         return
@@ -189,14 +220,13 @@ def stop_xlog_streaming(process):
 
 def main():
     argp = argparse.ArgumentParser(
-        description='Kill idle Postgres connections based on configured settings (per host, db, username, timeout). Meant to be run from Cron')
-    argp.add_argument('-c', '--config', required=True, help='walbouner yaml config file')
-    argp.add_argument('-r', '--replica-name', help='name of replica to be built (application_name from config)', required=True)
+        description='Creates a selective Postgres replica based on an Walbouncer config')
+    argp.add_argument('-c', '--config', required=True, help='walbouncer yaml format config file')
+    argp.add_argument('-r', '--replica-name', help='name of replica to be built (application_name from the config)', required=True)
     argp.add_argument('-u', '--user', help='user for rsync copy from master', default=os.getenv('USER'))
     argp.add_argument('-n', '--dry-run', action='store_true', help='just show what would be executed')
     argp.add_argument('-q', '--quiet', action='store_true', default=False)
     argp.add_argument('-D', '--pgdata', required=True)
-    # TODO host/port to enable replica building w/o WB config
 
     global args
     args = argp.parse_args()
@@ -220,19 +250,36 @@ def main():
 
     ts_inc, ts_excl = get_included_and_excluded_tablespaces_from_config(args.replica_name)
     db_inc, db_excl = get_included_and_excluded_databases_from_config(args.replica_name)
-
-    ts_inc_oids = get_oids_for_tablespaces(ts_inc + ['pg_default', 'pg_global'])
-    ts_excl_oids = get_oids_for_tablespaces(ts_excl)
-
-    # db_inc_oids = get_oids_for_databases(tbs_inc)
-    db_inc_oids = get_oids_and_tablespaces_for_databases(['postgres'] + ['template0', 'template1'])
-    db_excl_oids = get_oids_and_tablespaces_for_databases(ts_excl)
+    ts_excl_oids = []
+    db_excl_oids = []
 
     logging.info('include_tablespaces: %s, exclude_tablespaces: %s', ts_inc, ts_excl)
     logging.info('include_databases: %s, exclude_databases: %s', db_inc, db_excl)
 
-    logging.info('include_tablespaces_oids: %s, exclude_tablespaces_oids: %s', ts_inc_oids, ts_excl_oids)
-    logging.info('include_databases_oids: %s, exclude_database_oids: %s', db_inc_oids, db_excl_oids)
+    if (ts_excl and ts_inc) or (db_excl and db_inc):
+        logging.error('only exclude or include listings allowed per db/tblspc!')
+
+    ts_all_oids = get_oids_for_all_tablespaces()
+    if ts_excl:
+        ts_excl_oids = get_oids_for_tablespaces(ts_excl)
+    elif ts_inc:
+        ts_inc_oids = get_oids_for_tablespaces(ts_inc + ['pg_default', 'pg_global'])
+        ts_excl_oids = set(ts_all_oids) - set(ts_inc_oids)
+
+    tablespace_paths_to_copy = get_tablespace_paths_by_oids(list(set(ts_all_oids) - set(ts_excl_oids)))
+    logging.info('tablespace_paths_to_copy: %s', tablespace_paths_to_copy)
+
+    if db_excl:
+        db_excl_infos = get_oids_and_tablespaces_for_databases(db_excl)
+        db_excl_oids = [x['oid'] for x in db_excl_infos]
+    elif db_inc:
+        db_inc_infos = get_oids_and_tablespaces_for_databases(db_inc + ['template0', 'template1'])
+        db_inc_oids = [x['oid'] for x in db_inc_infos]
+        db_all_oids = get_all_db_oids()
+        db_excl_oids = set(db_all_oids) - set(db_inc_oids)
+
+    logging.info('excluded tablespaces oids: %s', ts_excl_oids)
+    logging.info('excluded database oids: %s', db_excl_oids)
 
     # if args.dry_run:
     master_datadir = get_master_data_diretory()
@@ -244,7 +291,7 @@ def main():
     p = start_xlog_streaming(connect_config)
 
     # just "hoping" this time is enough to start xlog streaming
-    logging.info('waiting 10s for streaming to start...')
+    logging.info('waiting 10s for XLOG streaming to start...[in hope it''s enough]')
     if not args.dry_run:
         time.sleep(10)  # make into a param?
 
@@ -254,17 +301,28 @@ def main():
         pg_start_backup()
 
         do_basebackup(config['master']['host'], args.user, master_datadir, args.pgdata,
-                      ts_inc_oids=ts_inc_oids, ts_excl_oids=ts_excl_oids, db_inc_oids=db_inc_oids, db_excl_oids=db_excl_oids)
+                      ts_excl_oids=ts_excl_oids, db_excl_oids=db_excl_oids, tablespace_paths_to_copy=tablespace_paths_to_copy)
         success = True
     finally:
-        pg_stop_backup()
 
-        stop_xlog_streaming(p)
+        try:
+            pg_stop_backup()
+        except:
+            logging.error('WARNING! failure on pg_stop_backup(). manual call of pg_stop_backup() needed on master!')
+
+        try:
+            stop_xlog_streaming(p)
+        except:
+            logging.error('WARNING! failure on stop_xlog_streaming(). manual termination of process needed!')
 
         if success:
             rename_temp_to_xlog(args.pgdata, TEMP_XLOGS_DIR)
 
     logging.info('finished in %s s', round(time.time() - t1))
 
+
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.error('User interrupt. Exiting.')
