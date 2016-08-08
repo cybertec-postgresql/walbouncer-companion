@@ -104,7 +104,6 @@ def run_shell(cmd_line_params):
         raise Exception('run_shell() expects list input!')
     p = Popen(cmd_line_params)
     p.wait()
-    # print "done"
 
 
 def run_shell_returning_process(cmd_line_params):
@@ -112,10 +111,6 @@ def run_shell_returning_process(cmd_line_params):
         raise Exception('run_shell() expects list input!')
     p = Popen(cmd_line_params)
     return p
-    # print "done"
-
-# run_shell(['ls', '-l', ';;', 'sleep', '10'])
-# run_shell(['ls', '-l'])
 
 
 def pg_start_backup():
